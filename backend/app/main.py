@@ -13,6 +13,7 @@ from .config import settings
 import cloudinary
 import cloudinary.uploader
 
+
 def upload_to_cloudinary(content: bytes, folder: str) -> str:
     if not settings.cloudinary_cloud_name or not settings.cloudinary_api_key or not settings.cloudinary_api_secret:
         raise HTTPException(503, "Cloudinary is not configured")
@@ -30,6 +31,48 @@ def upload_to_cloudinary(content: bytes, folder: str) -> str:
         resource_type="image",
     )
     return result["secure_url"]
+
+from urllib.parse import urlparse
+def delete_cloudinary_image(image_url: str) -> None:
+    if not image_url.startswith("https://res.cloudinary.com/"):
+        return
+
+    if not settings.cloudinary_cloud_name or not settings.cloudinary_api_key or not settings.cloudinary_api_secret:
+        raise HTTPException(503, "Cloudinary is not configured")
+
+    cloudinary.config(
+        cloud_name=settings.cloudinary_cloud_name,
+        api_key=settings.cloudinary_api_key,
+        api_secret=settings.cloudinary_api_secret,
+        secure=True,
+    )
+
+    parts = urlparse(image_url).path.strip("/").split("/")
+
+    try:
+        upload_index = parts.index("upload")
+        asset_parts = parts[upload_index + 1:]
+
+        if asset_parts and asset_parts[0].startswith("v") and asset_parts[0][1:].isdigit():
+            asset_parts = asset_parts[1:]
+
+        if not asset_parts:
+            raise HTTPException(400, "Unable to identify the Cloudinary image")
+
+        public_id = "/".join(asset_parts)
+        last_slash = public_id.rfind("/")
+        dot_index = public_id.rfind(".")
+        if dot_index > last_slash:
+            public_id = public_id[:dot_index]
+
+        result = cloudinary.uploader.destroy(public_id, invalidate=True)
+
+        if result.get("result") not in ("ok", "not found"):
+            raise HTTPException(502, "Cloudinary image deletion failed")
+
+    except (ValueError, IndexError):
+        raise HTTPException(400, "Unable to identify the Cloudinary image")
+
 
 from .db import Base, engine, get_db, SessionLocal
 from .models import RoomType, Booking, SiteImage, SiteSetting
@@ -203,6 +246,8 @@ def admin_delete_slideshow_image(image_id: int, db: Session = Depends(get_db), _
         except OSError:
             pass
     db.delete(image)
+    if image.image_url.startswith("https://res.cloudinary.com/"):
+        delete_cloudinary_image(image.image_url)
     db.commit()
     return {"message": "Slideshow image deleted."}
 
@@ -300,6 +345,8 @@ def admin_delete_gallery_image(
                 pass
 
     db.delete(image)
+    if image.image_url.startswith("https://res.cloudinary.com/"):
+        delete_cloudinary_image(image.image_url)
     db.commit()
     return {"message": "Gallery image deleted."}
 
@@ -465,7 +512,7 @@ async def admin_upload_images(
     db.refresh(room)
 
     return room_json(room)
-   
+
 
 
 @app.delete("/api/admin/rooms/{room_id}/images/{image_index}")
@@ -484,6 +531,8 @@ def admin_delete_room_image(
         raise HTTPException(404, "Room image not found")
 
     removed = images.pop(image_index)
+    if removed.startswith("https://res.cloudinary.com/"):
+        delete_cloudinary_image(removed)
     set_image_list(room, images)
     db.commit()
 
