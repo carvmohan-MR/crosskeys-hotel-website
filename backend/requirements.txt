@@ -9,3 +9,4 @@ passlib[bcrypt]>=1.7
 python-multipart>=0.0.9
 razorpay>=1.4
 reportlab>=4.2
+cloudinary

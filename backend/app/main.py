@@ -9,6 +9,28 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, text
 from .config import settings
+
+import cloudinary
+import cloudinary.uploader
+
+def upload_to_cloudinary(content: bytes, folder: str) -> str:
+    if not settings.cloudinary_cloud_name or not settings.cloudinary_api_key or not settings.cloudinary_api_secret:
+        raise HTTPException(503, "Cloudinary is not configured")
+
+    cloudinary.config(
+        cloud_name=settings.cloudinary_cloud_name,
+        api_key=settings.cloudinary_api_key,
+        api_secret=settings.cloudinary_api_secret,
+        secure=True,
+    )
+
+    result = cloudinary.uploader.upload(
+        content,
+        folder=f"crosskeys/{folder}",
+        resource_type="image",
+    )
+    return result["secure_url"]
+
 from .db import Base, engine, get_db, SessionLocal
 from .models import RoomType, Booking, SiteImage, SiteSetting
 from .schemas import BookingCreate, RoomCreate, LoginIn, PaymentVerify
@@ -104,29 +126,52 @@ def admin_get_slideshow(db: Session = Depends(get_db), _: str = Depends(require_
     return {"images": [site_image_json(i) for i in images], "interval_seconds": slideshow_interval(db)}
 
 
+
 @app.post("/api/admin/slideshow/images")
-async def admin_upload_slideshow_images(files: list[UploadFile] = File(...), db: Session = Depends(get_db), _: str = Depends(require_admin)):
-    allowed = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-    folder = Path(settings.upload_dir)
-    folder.mkdir(parents=True, exist_ok=True)
-    count = db.query(SiteImage).filter(SiteImage.section == "slideshow").count()
+async def admin_upload_slideshow_images(
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+):
+    allowed = {"image/jpeg", "image/png", "image/webp"}
+    count = db.query(SiteImage).filter(
+        SiteImage.section == "slideshow"
+    ).count()
     created = []
+
     for file in files:
         if file.content_type not in allowed:
             raise HTTPException(400, "Only JPG, PNG or WEBP images are allowed")
+
         content = await file.read()
         if not content or len(content) > 20 * 1024 * 1024:
             raise HTTPException(400, "Each image must be non-empty and 20 MB or smaller")
-        name = secrets.token_hex(12) + allowed[file.content_type]
-        (folder / name).write_bytes(content)
-        image = SiteImage(image_url=f"/uploads/{name}", section="slideshow", sort_order=count, active=True)
+
+        try:
+            image_url = upload_to_cloudinary(content, "slideshow")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(502, "Unable to upload image to Cloudinary")
+
+        image = SiteImage(
+            image_url=image_url,
+            section="slideshow",
+            sort_order=count,
+            active=True,
+        )
         db.add(image)
         created.append(image)
         count += 1
+
     db.commit()
     for image in created:
         db.refresh(image)
-    return {"images": [site_image_json(i) for i in created], "message": f"Uploaded {len(created)} slideshow image(s)."}
+
+    return {
+        "images": [site_image_json(i) for i in created],
+        "message": f"Uploaded {len(created)} slideshow image(s).",
+    }
 
 
 @app.patch("/api/admin/slideshow/images/{image_id}")
@@ -174,25 +219,52 @@ def admin_get_gallery(db: Session = Depends(get_db), _: str = Depends(require_ad
     return {"images": [site_image_json(i) for i in images]}
 
 
+
 @app.post("/api/admin/gallery/images")
-async def admin_upload_gallery_images(files: list[UploadFile] = File(...), db: Session = Depends(get_db), _: str = Depends(require_admin)):
-    allowed = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-    folder = Path(settings.upload_dir); folder.mkdir(parents=True, exist_ok=True)
-    count = db.query(SiteImage).filter(SiteImage.section == "gallery").count()
+async def admin_upload_gallery_images(
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+):
+    allowed = {"image/jpeg", "image/png", "image/webp"}
+    count = db.query(SiteImage).filter(
+        SiteImage.section == "gallery"
+    ).count()
     created = []
+
     for file in files:
         if file.content_type not in allowed:
             raise HTTPException(400, "Only JPG, PNG or WEBP images are allowed")
+
         content = await file.read()
         if not content or len(content) > 20 * 1024 * 1024:
             raise HTTPException(400, "Each image must be non-empty and 20 MB or smaller")
-        name = secrets.token_hex(12) + allowed[file.content_type]
-        (folder / name).write_bytes(content)
-        image = SiteImage(image_url=f"/uploads/{name}", section="gallery", sort_order=count, active=True)
-        db.add(image); created.append(image); count += 1
+
+        try:
+            image_url = upload_to_cloudinary(content, "gallery")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(502, "Unable to upload image to Cloudinary")
+
+        image = SiteImage(
+            image_url=image_url,
+            section="gallery",
+            sort_order=count,
+            active=True,
+        )
+        db.add(image)
+        created.append(image)
+        count += 1
+
     db.commit()
-    for image in created: db.refresh(image)
-    return {"images": [site_image_json(i) for i in created], "message": f"Uploaded {len(created)} gallery image(s)."}
+    for image in created:
+        db.refresh(image)
+
+    return {
+        "images": [site_image_json(i) for i in created],
+        "message": f"Uploaded {len(created)} gallery image(s).",
+    }
 
 
 @app.patch("/api/admin/gallery/images/{image_id}")
@@ -206,15 +278,31 @@ def admin_update_gallery_image(image_id: int, data: dict, db: Session = Depends(
     db.commit(); db.refresh(image); return site_image_json(image)
 
 
+
 @app.delete("/api/admin/gallery/images/{image_id}")
-def admin_delete_gallery_image(image_id: int, db: Session = Depends(get_db), _: str = Depends(require_admin)):
+def admin_delete_gallery_image(
+    image_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+):
     image = db.get(SiteImage, image_id)
-    if not image or image.section != "gallery": raise HTTPException(404, "Gallery image not found")
-    image_path = image.image_url.removeprefix("/uploads/")
-    if image_path and Path(image_path).name == image_path:
-        try: (Path(settings.upload_dir) / image_path).unlink(missing_ok=True)
-        except OSError: pass
-    db.delete(image); db.commit(); return {"message": "Gallery image deleted."}
+    if not image or image.section != "gallery":
+        raise HTTPException(404, "Gallery image not found")
+
+    image_url = image.image_url
+
+    if image_url.startswith("/uploads/"):
+        image_path = image_url.removeprefix("/uploads/")
+        if image_path and Path(image_path).name == image_path:
+            try:
+                (Path(settings.upload_dir) / image_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    db.delete(image)
+    db.commit()
+    return {"message": "Gallery image deleted."}
+
 
 
 @app.patch("/api/admin/slideshow/settings")
@@ -340,42 +428,75 @@ def admin_update_room(room_id: int, data: RoomCreate, db: Session = Depends(get_
     db.commit(); db.refresh(room)
     return room_json(room)
 
-@app.post("/api/admin/rooms/{room_id}/images")
-async def admin_upload_images(room_id: int, files: list[UploadFile] = File(...), db: Session = Depends(get_db), _: str = Depends(require_admin)):
-    room = db.get(RoomType, room_id)
-    if not room: raise HTTPException(404, "Room type not found")
-    allowed = {"image/jpeg", "image/png", "image/webp"}
-    folder = Path(settings.upload_dir); folder.mkdir(parents=True, exist_ok=True)
-    current = image_list(room)
-    for file in files:
-        if file.content_type not in allowed: raise HTTPException(400, "Only JPG, PNG or WEBP images are allowed")
-        content = await file.read()
-        if not content or len(content) > 20 * 1024 * 1024: raise HTTPException(400, "Each image must be non-empty and 20 MB or smaller")
-        ext = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[file.content_type]
-        name = secrets.token_hex(12) + ext
-        (folder / name).write_bytes(content)
-        current.append(f"/uploads/{name}")
-    set_image_list(room, current); db.commit()
-    return room_json(room)
 
-@app.delete("/api/admin/rooms/{room_id}/images/{image_index}")
-def admin_delete_room_image(room_id: int, image_index: int, db: Session = Depends(get_db), _: str = Depends(require_admin)):
+@app.post("/api/admin/rooms/{room_id}/images")
+async def admin_upload_images(
+    room_id: int,
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+):
     room = db.get(RoomType, room_id)
     if not room:
         raise HTTPException(404, "Room type not found")
+
+    allowed = {"image/jpeg", "image/png", "image/webp"}
+    current = image_list(room)
+
+    for file in files:
+        if file.content_type not in allowed:
+            raise HTTPException(400, "Only JPG, PNG or WEBP images are allowed")
+
+        content = await file.read()
+        if not content or len(content) > 20 * 1024 * 1024:
+            raise HTTPException(400, "Each image must be non-empty and 20 MB or smaller")
+
+        try:
+            image_url = upload_to_cloudinary(content, "rooms")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(502, "Unable to upload image to Cloudinary")
+
+        current.append(image_url)
+
+    set_image_list(room, current)
+    db.commit()
+    db.refresh(room)
+
+    return room_json(room)
+   
+
+
+@app.delete("/api/admin/rooms/{room_id}/images/{image_index}")
+def admin_delete_room_image(
+    room_id: int,
+    image_index: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+):
+    room = db.get(RoomType, room_id)
+    if not room:
+        raise HTTPException(404, "Room type not found")
+
     images = image_list(room)
     if image_index < 0 or image_index >= len(images):
         raise HTTPException(404, "Room image not found")
+
     removed = images.pop(image_index)
     set_image_list(room, images)
     db.commit()
-    image_path = removed.removeprefix("/uploads/")
-    if image_path and Path(image_path).name == image_path:
-        try:
-            (Path(settings.upload_dir) / image_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+
+    if removed.startswith("/uploads/"):
+        image_path = removed.removeprefix("/uploads/")
+        if image_path and Path(image_path).name == image_path:
+            try:
+                (Path(settings.upload_dir) / image_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     return room_json(room)
+
 
 
 @app.post("/api/admin/bookings/{reference}/cancel")
