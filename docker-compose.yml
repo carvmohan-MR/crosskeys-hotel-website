@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crosskeys
+      POSTGRES_USER: crosskeys
+      POSTGRES_PASSWORD: change_this_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - crosskeys_pgdata:/var/lib/postgresql/data
+volumes:
+  crosskeys_pgdata:
